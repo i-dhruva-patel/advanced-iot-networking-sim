@@ -4,6 +4,8 @@ from collections import deque, defaultdict
 from datetime import datetime
 import csv
 import os
+import time
+import threading
 
 HUB_IP = "0.0.0.0"
 HUB_PORT = 9000
@@ -25,6 +27,19 @@ def calculate_crc(data):
         crc ^= b
     return crc
 
+last_seen = defaultdict(lambda: time.time())
+
+def heartbeat_monitor():
+    CHECK_INTERVAL = 5  # seconds
+    TIMEOUT = 10        # seconds
+    while True:
+        time.sleep(CHECK_INTERVAL)
+        current_time = time.time()
+        for node_id, last_time in last_seen.items():
+            delta = current_time - last_time
+            if delta > TIMEOUT:
+                print(f"⚠️ Node {node_id} may be offline. Last seen {delta:.1f} seconds ago.")
+
 # Setup CSV logging
 log_file = "sensor_log.csv"
 log_exists = os.path.isfile(log_file)
@@ -38,6 +53,9 @@ with open(log_file, mode='a', newline='') as f:
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.bind((HUB_IP, HUB_PORT))
 print(f"🛠️ Hub server listening on {HUB_IP}:{HUB_PORT} ...\n")
+
+# Start heartbeat monitor thread
+threading.Thread(target=heartbeat_monitor, daemon=True).start()
 
 while True:
     data, addr = sock.recvfrom(1024)
@@ -57,6 +75,7 @@ while True:
     if calc_crc != recv_crc:
         print(f"❌ CRC mismatch from Node {node_id}: expected {recv_crc}, got {calc_crc}")
         continue
+    last_seen[node_id] = time.time()
 
     sensor_name = SENSOR_TYPE_MAP.get(sensor_type, "Unknown")
     sensor_history[node_id].append(value)
