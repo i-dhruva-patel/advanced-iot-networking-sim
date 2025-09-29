@@ -4,8 +4,9 @@ from collections import deque, defaultdict
 
 HUB_IP = "0.0.0.0"
 HUB_PORT = 9000
-PACKET_FORMAT = "<BBBfB"  # header, node_id, type, float payload, crc
+PACKET_FORMAT = "<BBBfB"
 PACKET_SIZE = struct.calcsize(PACKET_FORMAT)
+ANOMALY_THRESHOLD = 20.0  # degrees Celsius
 
 SENSOR_TYPE_MAP = {
     0x01: "Temperature",
@@ -13,7 +14,7 @@ SENSOR_TYPE_MAP = {
     0x03: "Motion",
 }
 
-sensor_history = defaultdict(lambda: deque(maxlen=5))  # node_id: deque of last 5 readings
+sensor_history = defaultdict(lambda: deque(maxlen=5))
 
 def calculate_crc(data):
     crc = 0
@@ -47,9 +48,13 @@ while True:
 
     sensor_name = SENSOR_TYPE_MAP.get(sensor_type, "Unknown")
 
-    # Rolling average logic
+    # Update history and calculate rolling average
     sensor_history[node_id].append(value)
     avg = sum(sensor_history[node_id]) / len(sensor_history[node_id])
 
-    print(f"✅ Node {node_id} | {sensor_name} = {value:.2f}°C | Rolling Avg (5) = {avg:.2f}°C | CRC OK")
+    # Check for anomaly
+    if abs(value - avg) > ANOMALY_THRESHOLD and len(sensor_history[node_id]) >= 3:
+        print(f"🚨 Anomaly Detected! Node {node_id} | {sensor_name} = {value:.2f}°C (Avg = {avg:.2f}°C)")
+    else:
+        print(f"✅ Node {node_id} | {sensor_name} = {value:.2f}°C | Rolling Avg = {avg:.2f}°C | CRC OK")
 
