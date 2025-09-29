@@ -6,19 +6,22 @@ from collections import deque, defaultdict
 import random
 import time
 
+# Constants
 HUB_PORT = 9000
 PACKET_FORMAT = "<BBBfB"
 PACKET_SIZE = struct.calcsize(PACKET_FORMAT)
+MAX_POINTS = 50
+ANOMALY_THRESHOLD = 20.0
 
-MAX_POINTS = 50  # number of recent values to display per node
-NUM_NODES = 10   # maximum node count expected
-
+# Data stores
 sensor_data = defaultdict(lambda: deque(maxlen=MAX_POINTS))
 node_colors = {}
+anomalies = defaultdict(list)  # node_id: list of (index, value)
 
 def generate_color():
     return (random.random(), random.random(), random.random())
 
+# UDP Receiver thread
 def udp_listener():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("0.0.0.0", HUB_PORT))
@@ -35,34 +38,44 @@ def udp_listener():
 
         sensor_data[node_id].append(value)
 
+        # Rolling average for anomaly detection
+        vals = list(sensor_data[node_id])
+        avg = sum(vals) / len(vals)
+        if abs(value - avg) > ANOMALY_THRESHOLD and len(vals) >= 3:
+            anomalies[node_id].append((len(vals) - 1, value))  # index and value
+
         if node_id not in node_colors:
             node_colors[node_id] = generate_color()
 
-# Set up plot
+# Plotting setup
 fig, ax = plt.subplots()
-lines = {}
 
 def animate(frame):
     ax.clear()
-    ax.set_title("🌡️ Live Sensor Data from Nodes")
+    ax.set_title("🌡️ Real-Time Sensor Data (Anomalies in 🔴)")
     ax.set_xlabel("Latest Samples")
     ax.set_ylabel("Sensor Value (°C)")
     ax.grid(True)
 
     for node_id, values in sensor_data.items():
-        if node_id not in lines:
-            lines[node_id], = ax.plot([], [], label=f"Node {node_id}", color=node_colors[node_id])
-
         x_vals = list(range(len(values)))
         y_vals = list(values)
-        ax.plot(x_vals, y_vals, label=f"Node {node_id}", color=node_colors[node_id])
+        color = node_colors[node_id]
+
+        # Plot main line
+        ax.plot(x_vals, y_vals, label=f"Node {node_id}", color=color)
+
+        # Plot anomalies as red dots
+        for idx, val in anomalies[node_id]:
+            if idx < len(x_vals):
+                ax.plot(x_vals[idx], y_vals[idx], 'ro')  # red circle
 
     ax.legend(loc="upper left")
 
+# Launch
 if __name__ == "__main__":
     import threading
-    listener_thread = threading.Thread(target=udp_listener, daemon=True)
-    listener_thread.start()
-
+    threading.Thread(target=udp_listener, daemon=True).start()
     ani = animation.FuncAnimation(fig, animate, interval=1000)
     plt.show()
+
