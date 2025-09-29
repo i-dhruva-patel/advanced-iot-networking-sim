@@ -1,6 +1,9 @@
 import socket
 import struct
 from collections import deque, defaultdict
+from datetime import datetime
+import csv
+import os
 
 HUB_IP = "0.0.0.0"
 HUB_PORT = 9000
@@ -18,13 +21,22 @@ sensor_history = defaultdict(lambda: deque(maxlen=5))
 
 def calculate_crc(data):
     crc = 0
-    for b in data[:-1]:
+    for b in data[:-1]:  # exclude the last byte (actual CRC)
         crc ^= b
     return crc
 
+# Setup CSV logging
+log_file = "sensor_log.csv"
+log_exists = os.path.isfile(log_file)
+
+with open(log_file, mode='a', newline='') as f:
+    writer = csv.writer(f)
+    if not log_exists:
+        writer.writerow(["timestamp", "node_id", "sensor_type", "value", "rolling_avg", "anomaly"])
+
+# Create UDP socket
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.bind((HUB_IP, HUB_PORT))
-
 print(f"🛠️ Hub server listening on {HUB_IP}:{HUB_PORT} ...\n")
 
 while True:
@@ -47,14 +59,18 @@ while True:
         continue
 
     sensor_name = SENSOR_TYPE_MAP.get(sensor_type, "Unknown")
-
-    # Update history and calculate rolling average
     sensor_history[node_id].append(value)
     avg = sum(sensor_history[node_id]) / len(sensor_history[node_id])
+    timestamp = datetime.now().isoformat(timespec='seconds')
+    is_anomaly = abs(value - avg) > ANOMALY_THRESHOLD and len(sensor_history[node_id]) >= 3
 
-    # Check for anomaly
-    if abs(value - avg) > ANOMALY_THRESHOLD and len(sensor_history[node_id]) >= 3:
+    if is_anomaly:
         print(f"🚨 Anomaly Detected! Node {node_id} | {sensor_name} = {value:.2f}°C (Avg = {avg:.2f}°C)")
     else:
         print(f"✅ Node {node_id} | {sensor_name} = {value:.2f}°C | Rolling Avg = {avg:.2f}°C | CRC OK")
+
+    # Append to CSV
+    with open(log_file, mode='a', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow([timestamp, node_id, sensor_name, f"{value:.2f}", f"{avg:.2f}", "YES" if is_anomaly else "NO"])
 
