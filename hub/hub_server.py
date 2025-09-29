@@ -1,95 +1,81 @@
 import socket
 import struct
-from collections import deque, defaultdict
-from datetime import datetime
-import csv
-import os
 import time
-import threading
+from collections import defaultdict, deque
 
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives import padding
+
+# --- Constants ---
 HUB_IP = "0.0.0.0"
 HUB_PORT = 9000
-PACKET_FORMAT = "<BBBfB"
-PACKET_SIZE = struct.calcsize(PACKET_FORMAT)
-ANOMALY_THRESHOLD = 20.0  # degrees Celsius
+SECRET_KEY = b"mysecretkey12345"  # 16 bytes = AES-128
 
-SENSOR_TYPE_MAP = {
-    0x01: "Temperature",
-    0x02: "Humidity",
-    0x03: "Motion",
-}
+PACKET_SIZE = 36  # 1(header) + 1(node_id) + 1(type) + 16(IV) + 16(ciphertext) + 1(crc)
+ANOMALY_THRESHOLD = 20.0
+ROLLING_WINDOW = 5
 
-sensor_history = defaultdict(lambda: deque(maxlen=5))
+# --- Data Stores ---
+sensor_history = defaultdict(lambda: deque(maxlen=ROLLING_WINDOW))
 
-def calculate_crc(data):
-    crc = 0
-    for b in data[:-1]:  # exclude the last byte (actual CRC)
-        crc ^= b
-    return crc
+# --- Decryption ---
+def decrypt_payload(iv, ct):
+    cipher = Cipher(algorithms.AES(SECRET_KEY), modes.CBC(iv))
+    decryptor = cipher.decryptor()
+    padded_data = decryptor.update(ct) + decryptor.finalize()
 
-last_seen = defaultdict(lambda: time.time())
+    unpadder = padding.PKCS7(128).unpadder()
+    raw = unpadder.update(padded_data) + unpadder.finalize()
+    value = struct.unpack("f", raw)[0]
+    return value
 
-def heartbeat_monitor():
-    CHECK_INTERVAL = 5  # seconds
-    TIMEOUT = 10        # seconds
-    while True:
-        time.sleep(CHECK_INTERVAL)
-        current_time = time.time()
-        for node_id, last_time in last_seen.items():
-            delta = current_time - last_time
-            if delta > TIMEOUT:
-                print(f"⚠️ Node {node_id} may be offline. Last seen {delta:.1f} seconds ago.")
-
-# Setup CSV logging
-log_file = "sensor_log.csv"
-log_exists = os.path.isfile(log_file)
-
-with open(log_file, mode='a', newline='') as f:
-    writer = csv.writer(f)
-    if not log_exists:
-        writer.writerow(["timestamp", "node_id", "sensor_type", "value", "rolling_avg", "anomaly"])
-
-# Create UDP socket
+# --- UDP Setup ---
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.bind((HUB_IP, HUB_PORT))
-print(f"🛠️ Hub server listening on {HUB_IP}:{HUB_PORT} ...\n")
 
-# Start heartbeat monitor thread
-threading.Thread(target=heartbeat_monitor, daemon=True).start()
+print(f"🛡️ Secure Hub Listening on {HUB_IP}:{HUB_PORT} ...\n")
 
+# --- Main Loop ---
 while True:
     data, addr = sock.recvfrom(1024)
 
     if len(data) != PACKET_SIZE:
-        print(f"⚠️ Invalid packet size from {addr}, got {len(data)} bytes")
+        print(f"⚠️ Invalid packet size from {addr}: {len(data)} bytes")
         continue
 
-    unpacked = struct.unpack(PACKET_FORMAT, data)
-    header, node_id, sensor_type, value, recv_crc = unpacked
+    header = data[0]
+    node_id = data[1]
+    sensor_type = data[2]
+    iv = data[3:19]
+    ciphertext = data[19:35]
+    recv_crc = data[35]
 
+    # Validate CRC
+    calc_crc = 0
+    for b in data[:-1]:
+        calc_crc ^= b
+    if calc_crc != recv_crc:
+        print(f"❌ CRC mismatch from Node {node_id}")
+        continue
+
+    # Validate header
     if header != 0xAA:
         print(f"🚫 Invalid header from Node {node_id}")
         continue
 
-    calc_crc = calculate_crc(data)
-    if calc_crc != recv_crc:
-        print(f"❌ CRC mismatch from Node {node_id}: expected {recv_crc}, got {calc_crc}")
+    try:
+        value = decrypt_payload(iv, ciphertext)
+    except Exception as e:
+        print(f"❌ Decryption error from Node {node_id}: {e}")
         continue
-    last_seen[node_id] = time.time()
 
-    sensor_name = SENSOR_TYPE_MAP.get(sensor_type, "Unknown")
+    # Update rolling average
     sensor_history[node_id].append(value)
     avg = sum(sensor_history[node_id]) / len(sensor_history[node_id])
-    timestamp = datetime.now().isoformat(timespec='seconds')
-    is_anomaly = abs(value - avg) > ANOMALY_THRESHOLD and len(sensor_history[node_id]) >= 3
 
-    if is_anomaly:
-        print(f"🚨 Anomaly Detected! Node {node_id} | {sensor_name} = {value:.2f}°C (Avg = {avg:.2f}°C)")
+    # Detect anomaly
+    if len(sensor_history[node_id]) >= 3 and abs(value - avg) > ANOMALY_THRESHOLD:
+        print(f"🚨 Anomaly Detected! Node {node_id} | Value = {value:.2f}°C (Avg = {avg:.2f}°C)")
     else:
-        print(f"✅ Node {node_id} | {sensor_name} = {value:.2f}°C | Rolling Avg = {avg:.2f}°C | CRC OK")
-
-    # Append to CSV
-    with open(log_file, mode='a', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow([timestamp, node_id, sensor_name, f"{value:.2f}", f"{avg:.2f}", "YES" if is_anomaly else "NO"])
+        print(f"✅ Node {node_id} | Value = {value:.2f}°C | Rolling Avg = {avg:.2f}°C | CRC OK")
 
