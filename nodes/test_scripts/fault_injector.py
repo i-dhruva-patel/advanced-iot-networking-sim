@@ -4,7 +4,8 @@ import random
 import os
 import signal
 
-NODE_PATH = "../node"  # compiled C sensor node binary
+#NODE_PATH = "../node"  # compiled C sensor node binary
+NODE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "../node"))
 NODE_ID = 4            # pick a new node ID for injection
 DROP_PROBABILITY = 0.2
 DELAY_PROBABILITY = 0.3
